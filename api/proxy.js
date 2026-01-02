@@ -1,11 +1,13 @@
-// api/proxy.js
+// Save this as: api/proxy.js
+// This creates a serverless function in Vercel that bypasses CORS
+
 export default async function handler(req, res) {
-  // Allow requests from anywhere
+  // Only allow from your Vercel domain
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
-  // Handle preflight requests
+  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
