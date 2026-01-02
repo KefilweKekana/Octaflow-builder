@@ -149,22 +149,100 @@ export default function ERPFlowAppBuilder() {
     setDraggedCard(index);
   };
 
-  const exportConfig = () => {
-    const config = {
-      ...appConfig,
-      last_updated: new Date().toISOString(),
-      version: (parseFloat(appConfig.version) + 0.1).toFixed(1)
-    };
-    
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'erpflow-config.json';
-    a.click();
-    
-    setAppConfig(config);
-    alert('✅ Config exported! Upload to ERPNext /files/ folder');
+  const exportConfig = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      
+      const config = {
+        ...appConfig,
+        last_updated: new Date().toISOString(),
+        version: (parseFloat(appConfig.version) + 0.1).toFixed(1)
+      };
+      
+      // Create base64 encoded file content
+      const fileContent = JSON.stringify(config, null, 2);
+      const base64Content = btoa(fileContent);
+      
+      const baseUrl = erpnextUrl.replace(/\/$/, '');
+      
+      // First, check if file already exists
+      let fileExists = false;
+      try {
+        const checkUrl = `${baseUrl}/api/resource/File?filters=[["file_name","=","erpflow-config.json"]]`;
+        const existingFiles = await proxyFetch(checkUrl, {
+          headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
+        });
+        
+        if (existingFiles.data && existingFiles.data.length > 0) {
+          fileExists = true;
+          // Delete old file
+          const oldFileId = existingFiles.data[0].name;
+          await proxyFetch(`${baseUrl}/api/resource/File/${oldFileId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
+          });
+        }
+      } catch (e) {
+        console.log('No existing file to delete');
+      }
+      
+      // Upload new file using ERPNext API
+      const uploadUrl = `${baseUrl}/api/resource/File`;
+      const uploadData = {
+        file_name: 'erpflow-config.json',
+        is_private: 0,
+        content: base64Content,
+        decode: true
+      };
+      
+      const uploadResponse = await proxyFetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${apiKey}:${apiSecret}`,
+          'Content-Type': 'application/json'
+        },
+        body: uploadData
+      });
+      
+      if (uploadResponse.data) {
+        // Also download locally as backup
+        const blob = new Blob([fileContent], { type: 'application/json' });
+        const downloadUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = 'erpflow-config.json';
+        a.click();
+        URL.revokeObjectURL(downloadUrl);
+        
+        setAppConfig(config);
+        
+        const fileUrl = `${baseUrl}${uploadResponse.data.file_url}`;
+        alert(`✅ Config uploaded to ERPNext successfully!\n\n📍 URL: ${fileUrl}\n\n✅ Also downloaded locally as backup.\n\nYour Flutter app will now fetch this config automatically!`);
+      }
+    } catch (err) {
+      console.error('Upload error:', err);
+      
+      // Fallback: Just download locally
+      const config = {
+        ...appConfig,
+        last_updated: new Date().toISOString(),
+        version: (parseFloat(appConfig.version) + 0.1).toFixed(1)
+      };
+      
+      const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'erpflow-config.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      setAppConfig(config);
+      setError(`⚠️ Could not upload to ERPNext: ${err.message}\n\nConfig downloaded locally instead. You can manually upload it to ERPNext.`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   if (!isAuthenticated) {
