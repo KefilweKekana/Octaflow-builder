@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Grid, Layout, Settings, Home, FileText, Plus, X, ChevronRight, Menu, LogOut, Download, Eye, Edit2, Trash2, GripVertical, Check } from 'lucide-react';
+import { Save, Grid, Layout, Settings, Home, FileText, Plus, X, GripVertical, Check, Download, Upload, RefreshCw } from 'lucide-react';
 
 export default function ERPFlowAppBuilder() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -11,6 +11,11 @@ export default function ERPFlowAppBuilder() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('home');
   const [draggedCard, setDraggedCard] = useState(null);
+  
+  // Preview state
+  const [deviceScreenshot, setDeviceScreenshot] = useState(null);
+  const [deviceConnected, setDeviceConnected] = useState(false);
+  const [lastScreenshotTime, setLastScreenshotTime] = useState(null);
   
   const [appConfig, setAppConfig] = useState({
     app_name: 'ERPFlow',
@@ -24,40 +29,79 @@ export default function ERPFlowAppBuilder() {
     forms: {}
   });
 
+  // Load saved config
   useEffect(() => {
     const saved = localStorage.getItem('app_config');
     if (saved) setAppConfig(JSON.parse(saved));
   }, []);
 
+  // Save config to localStorage
   useEffect(() => {
     if (appConfig.home_page.cards.length > 0) {
       localStorage.setItem('app_config', JSON.stringify(appConfig));
     }
   }, [appConfig]);
 
-  // PROXY FETCH FUNCTION - Bypasses CORS!
+  // Send config to preview server whenever it changes
+  useEffect(() => {
+    if (isAuthenticated) {
+      sendConfigToPreview();
+    }
+  }, [appConfig, isAuthenticated]);
+
+  // Poll for device screenshots
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    
+    const pollScreenshots = setInterval(async () => {
+      try {
+        const response = await fetch('/api/preview/screenshot');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.screenshot) {
+            setDeviceScreenshot(data.screenshot);
+            setDeviceConnected(true);
+            setLastScreenshotTime(new Date(data.timestamp));
+          }
+        } else {
+          setDeviceConnected(false);
+        }
+      } catch (error) {
+        setDeviceConnected(false);
+      }
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(pollScreenshots);
+  }, [isAuthenticated]);
+
+  // Send config to preview server
+  const sendConfigToPreview = async () => {
+    try {
+      await fetch('/api/preview/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: appConfig })
+      });
+    } catch (error) {
+      console.error('Failed to send config to preview:', error);
+    }
+  };
+
+  // Proxy fetch function
   const proxyFetch = async (url, options = {}) => {
     try {
       const response = await fetch('/api/proxy', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url,
           method: options.method || 'GET',
           headers: options.headers || {},
           body: options.body
-        }),
+        })
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return await response.json();
+      return response;
     } catch (error) {
-      console.error('Proxy fetch error:', error);
       throw error;
     }
   };
@@ -70,28 +114,21 @@ export default function ERPFlowAppBuilder() {
       let url = erpnextUrl.trim();
       if (!url.startsWith('http')) url = 'https://' + url;
       
-      // Remove trailing slash to prevent double slashes
-      url = url.replace(/\/$/, '');
-      
       localStorage.setItem('erpnext_url', url);
       localStorage.setItem('api_key', apiKey);
       localStorage.setItem('api_secret', apiSecret);
       
-      // Use proxy instead of direct fetch
-      const data = await proxyFetch(
-        `${url}/api/resource/DocType?fields=["name","module"]&filters=[["issingle","=",0],["istable","=",0]]&limit_page_length=500`,
-        {
-          headers: { 
-            'Authorization': `token ${apiKey}:${apiSecret}` 
-          }
-        }
-      );
+      const response = await proxyFetch(`${url}/api/resource/DocType?fields=["name","module"]&filters=[["issingle","=",0],["istable","=",0]]&limit_page_length=500`, {
+        headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
+      });
       
+      if (!response.ok) throw new Error('Authentication failed');
+      
+      const data = await response.json();
       setDoctypes(data.data.map(dt => ({ name: dt.name, module: dt.module || 'Custom' })));
       setIsAuthenticated(true);
     } catch (err) {
-      setError('Failed to connect. Please check your credentials.');
-      console.error('Login error:', err);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -150,96 +187,26 @@ export default function ERPFlowAppBuilder() {
   };
 
   const exportConfig = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      setError('');
-      
       const config = {
         ...appConfig,
         last_updated: new Date().toISOString(),
         version: (parseFloat(appConfig.version) + 0.1).toFixed(1)
       };
       
-      // Create base64 encoded file content
-      const fileContent = JSON.stringify(config, null, 2);
-      const base64Content = btoa(fileContent);
-      
-      const baseUrl = erpnextUrl.replace(/\/$/, '');
-      
-      // First, check if file already exists
-      let fileExists = false;
-      try {
-        const checkUrl = `${baseUrl}/api/resource/File?filters=[["file_name","=","erpflow-config.json"]]`;
-        const existingFiles = await proxyFetch(checkUrl, {
-          headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
-        });
-        
-        if (existingFiles.data && existingFiles.data.length > 0) {
-          fileExists = true;
-          // Delete old file
-          const oldFileId = existingFiles.data[0].name;
-          await proxyFetch(`${baseUrl}/api/resource/File/${oldFileId}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
-          });
-        }
-      } catch (e) {
-        console.log('No existing file to delete');
-      }
-      
-      // Upload new file using ERPNext API
-      const uploadUrl = `${baseUrl}/api/resource/File`;
-      const uploadData = {
-        file_name: 'erpflow-config.json',
-        is_private: 0,
-        content: base64Content,
-        decode: true
-      };
-      
-      const uploadResponse = await proxyFetch(uploadUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `token ${apiKey}:${apiSecret}`,
-          'Content-Type': 'application/json'
-        },
-        body: uploadData
-      });
-      
-      if (uploadResponse.data) {
-        // Also download locally as backup
-        const blob = new Blob([fileContent], { type: 'application/json' });
-        const downloadUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = 'erpflow-config.json';
-        a.click();
-        URL.revokeObjectURL(downloadUrl);
-        
-        setAppConfig(config);
-        
-        const fileUrl = `${baseUrl}${uploadResponse.data.file_url}`;
-        alert(`✅ Config uploaded to ERPNext successfully!\n\n📍 URL: ${fileUrl}\n\n✅ Also downloaded locally as backup.\n\nYour Flutter app will now fetch this config automatically!`);
-      }
-    } catch (err) {
-      console.error('Upload error:', err);
-      
-      // Fallback: Just download locally
-      const config = {
-        ...appConfig,
-        last_updated: new Date().toISOString(),
-        version: (parseFloat(appConfig.version) + 0.1).toFixed(1)
-      };
-      
+      // Download locally as backup
       const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = 'erpflow-config.json';
       a.click();
-      URL.revokeObjectURL(url);
       
       setAppConfig(config);
-      setError(`⚠️ Could not upload to ERPNext: ${err.message}\n\nConfig downloaded locally instead. You can manually upload it to ERPNext.`);
+      alert('✅ Config exported and sent to preview!');
+    } catch (error) {
+      alert('⚠️ Export failed: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -322,13 +289,21 @@ export default function ERPFlowAppBuilder() {
             </div>
           </div>
           
-          <button
-            onClick={exportConfig}
-            className="flex items-center space-x-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg"
-          >
-            <Download className="w-4 h-4" />
-            <span>Export Config</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${deviceConnected ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+              <div className={`w-2 h-2 rounded-full ${deviceConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+              <span className="text-sm font-medium">{deviceConnected ? 'Device Connected' : 'Waiting for device...'}</span>
+            </div>
+            
+            <button
+              onClick={exportConfig}
+              disabled={loading}
+              className="flex items-center space-x-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg"
+            >
+              <Download className="w-4 h-4" />
+              <span>Export Config</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -471,45 +446,34 @@ export default function ERPFlowAppBuilder() {
           <div className="flex-1 overflow-y-auto p-8 bg-gray-100">
             <div className="max-w-md mx-auto">
               <div className="bg-gray-800 rounded-[3rem] p-4 shadow-2xl">
-                <div className="bg-white rounded-[2.5rem] overflow-hidden" style={{ aspectRatio: '9/19.5' }}>
-                  <div className="bg-gray-100 px-6 py-2 flex justify-between text-xs">
-                    <span>9:41</span>
-                    <div className="flex space-x-1">
-                      <div className="w-4 h-3 bg-gray-400 rounded-sm"></div>
-                      <div className="w-4 h-3 bg-gray-400 rounded-sm"></div>
+                <div className="bg-white rounded-[2.5rem] overflow-hidden relative" style={{ aspectRatio: '9/19.5' }}>
+                  {deviceScreenshot ? (
+                    <img 
+                      src={`data:image/png;base64,${deviceScreenshot}`}
+                      alt="Device Preview"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-gray-100">
+                      <div className="text-center p-8">
+                        <RefreshCw className="w-16 h-16 mx-auto mb-4 text-gray-400 animate-spin" />
+                        <p className="text-gray-600 font-medium">Waiting for Flutter app...</p>
+                        <p className="text-sm text-gray-500 mt-2">Run your app with preview mode enabled</p>
+                      </div>
                     </div>
-                  </div>
-                  
-                  <div className="px-6 py-4" style={{ backgroundColor: appConfig.theme.primary_color }}>
-                    <h1 className="text-xl font-bold text-white">{appConfig.app_name}</h1>
-                  </div>
-                  
-                  <div className="p-4" style={{ backgroundColor: appConfig.theme.background_color, minHeight: '500px' }}>
-                    {appConfig.home_page.cards.length === 0 ? (
-                      <div className="text-center py-12 text-gray-400">
-                        <Grid className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                        <p>Add cards from sidebar</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-3">
-                        {appConfig.home_page.cards.map((card, i) => (
-                          <div key={i} className="bg-white rounded-xl p-4 shadow-md">
-                            <div 
-                              className="w-12 h-12 rounded-lg flex items-center justify-center mb-3"
-                              style={{ backgroundColor: appConfig.theme.primary_color + '20' }}
-                            >
-                              <FileText className="w-6 h-6" style={{ color: appConfig.theme.primary_color }} />
-                            </div>
-                            <div className="font-semibold text-sm">{card.label}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </div>
               </div>
               
-              <p className="text-center text-sm text-gray-600 mt-4">Live Preview</p>
+              <div className="mt-4 text-center">
+                <p className="text-sm text-gray-600">
+                  {deviceConnected ? (
+                    <>Live Preview • Last updated {lastScreenshotTime?.toLocaleTimeString()}</>
+                  ) : (
+                    'Run Flutter app to see live preview'
+                  )}
+                </p>
+              </div>
             </div>
           </div>
         </div>
