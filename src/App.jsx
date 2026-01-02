@@ -35,6 +35,33 @@ export default function ERPFlowAppBuilder() {
     }
   }, [appConfig]);
 
+  // PROXY FETCH FUNCTION - Bypasses CORS!
+  const proxyFetch = async (url, options = {}) => {
+    try {
+      const response = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url,
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.body
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Proxy fetch error:', error);
+      throw error;
+    }
+  };
+
   const handleLogin = async () => {
     setLoading(true);
     setError('');
@@ -43,21 +70,28 @@ export default function ERPFlowAppBuilder() {
       let url = erpnextUrl.trim();
       if (!url.startsWith('http')) url = 'https://' + url;
       
+      // Remove trailing slash to prevent double slashes
+      url = url.replace(/\/$/, '');
+      
       localStorage.setItem('erpnext_url', url);
       localStorage.setItem('api_key', apiKey);
       localStorage.setItem('api_secret', apiSecret);
       
-      const response = await fetch(`${url}/api/resource/DocType?fields=["name","module"]&filters=[["issingle","=",0],["istable","=",0]]&limit_page_length=500`, {
-        headers: { 'Authorization': `token ${apiKey}:${apiSecret}` }
-      });
+      // Use proxy instead of direct fetch
+      const data = await proxyFetch(
+        `${url}/api/resource/DocType?fields=["name","module"]&filters=[["issingle","=",0],["istable","=",0]]&limit_page_length=500`,
+        {
+          headers: { 
+            'Authorization': `token ${apiKey}:${apiSecret}` 
+          }
+        }
+      );
       
-      if (!response.ok) throw new Error('Authentication failed');
-      
-      const data = await response.json();
       setDoctypes(data.data.map(dt => ({ name: dt.name, module: dt.module || 'Custom' })));
       setIsAuthenticated(true);
     } catch (err) {
-      setError(err.message);
+      setError('Failed to connect. Please check your credentials.');
+      console.error('Login error:', err);
     } finally {
       setLoading(false);
     }
